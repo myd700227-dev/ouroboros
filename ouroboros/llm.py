@@ -336,8 +336,36 @@ class LLMClient:
                 kwargs["tools"] = tools_with_cache
                 kwargs["tool_choice"] = tool_choice
 
-        resp = client.chat.completions.create(**kwargs)
-        resp_dict = resp.model_dump()
+        # For GigaChat: bypass OpenAI SDK to avoid JSON serialization "400 syntax" errors
+        if model.startswith("gigachat/"):
+            import requests as _req, json as _json_giga
+            url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+            # Ensure token is valid
+            import time as _t
+            if not getattr(self, "_gigachat_token", None) or _t.time() >= getattr(self, "_gigachat_token_expires", 0) - 60:
+                self._update_gigachat_token()
+            headers = {
+                "Authorization": f"Bearer {self._gigachat_token}",
+                "Content-Type": "application/json",
+            }
+            try:
+                giga_payload_bytes = _json_giga.dumps(kwargs, ensure_ascii=False, default=str).encode("utf-8")
+                raw_resp = _req.post(url, headers=headers, data=giga_payload_bytes, verify=False, timeout=120)
+                if raw_resp.status_code != 200:
+                    raise Exception(f"GigaChat API error: {raw_resp.status_code} {raw_resp.text}")
+                resp_dict = raw_resp.json()
+            except Exception as _e:
+                from openai import BadRequestError
+                import httpx
+                # Wrap in OpenAI-like error so loop.py catches it normally
+                err_msg = str(_e)
+                if "400" in err_msg or "invalid JSON" in err_msg:
+                    raise BadRequestError(err_msg, response=httpx.Response(status_code=400, request=httpx.Request("POST", url)), body=None)
+                raise
+        else:
+            resp = client.chat.completions.create(**kwargs)
+            resp_dict = resp.model_dump()
+
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
@@ -345,16 +373,6 @@ class LLMClient:
         # Convert GigaChat legacy function_call -> OpenAI tool_calls
         if model.startswith("gigachat/") and not msg.get("tool_calls"):
             fc = msg.get("function_call")
-            if not fc:
-                try:
-                    raw_msg = resp.choices[0].message
-                    fc = getattr(raw_msg, "function_call", None) or (raw_msg.model_extra or {}).get("function_call")
-                    if hasattr(fc, "model_dump"):
-                        fc = fc.model_dump()
-                    elif fc and hasattr(fc, "__dict__"):
-                        fc = {k: v for k, v in fc.__dict__.items() if not k.startswith("_")}
-                except Exception:
-                    fc = None
             if fc:
                 fc_name = fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)
                 finish_reason = (choices[0] if choices else {}).get("finish_reason", "?")
