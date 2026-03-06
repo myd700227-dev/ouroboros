@@ -236,6 +236,23 @@ class LLMClient:
         if model.startswith("gigachat/"):
             actual_model = model[len("gigachat/"):]
             extra_body.clear() # GigaChat does not support OpenRouter extra_body
+            
+            # GigaChat also crashes if messages contain cache_control objects
+            new_messages = []
+            for m in messages:
+                new_m = {**m}
+                if isinstance(new_m.get("content"), list):
+                    new_content = []
+                    for block in new_m["content"]:
+                        if isinstance(block, dict):
+                            new_block = {**block}
+                            new_block.pop("cache_control", None)
+                            new_content.append(new_block)
+                        else:
+                            new_content.append(block)
+                    new_m["content"] = new_content
+                new_messages.append(new_m)
+            messages = new_messages
 
         kwargs: Dict[str, Any] = {
             "model": actual_model,
@@ -256,26 +273,11 @@ class LLMClient:
             kwargs["tools"] = tools_with_cache
             kwargs["tool_choice"] = tool_choice
 
-        try:
-            resp = client.chat.completions.create(**kwargs)
-            resp_dict = resp.model_dump()
-            usage = resp_dict.get("usage") or {}
-            choices = resp_dict.get("choices") or [{}]
-            msg = (choices[0] if choices else {}).get("message") or {}
-        except Exception as e:
-            # We want to catch the original bad request error, and dump payload!
-            if "gigachat" in str(getattr(client, "base_url", str(client))):
-                try:
-                    import json
-                    with open("/tmp/gigachat_crash_payload.json", "w") as f:
-                        f.write(f"ERROR: {repr(e)}\n")
-                        try:
-                            json.dump(kwargs, f, indent=2)
-                        except Exception:
-                            f.write(repr(kwargs))
-                except Exception:
-                    pass
-            raise e
+        resp = client.chat.completions.create(**kwargs)
+        resp_dict = resp.model_dump()
+        usage = resp_dict.get("usage") or {}
+        choices = resp_dict.get("choices") or [{}]
+        msg = (choices[0] if choices else {}).get("message") or {}
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):
