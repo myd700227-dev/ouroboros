@@ -237,21 +237,58 @@ class LLMClient:
             actual_model = model[len("gigachat/"):]
             extra_body.clear() # GigaChat does not support OpenRouter extra_body
             
-            # GigaChat also crashes if messages contain cache_control objects
+            # GigaChat does not support: list-typed content, role="tool",
+            # or assistant messages with tool_calls. Flatten all of these.
+            def _flatten_content_for_gigachat(content):
+                """Convert list content to plain string for GigaChat."""
+                if isinstance(content, str):
+                    return content
+                if not isinstance(content, list):
+                    return str(content) if content else ""
+                parts = []
+                for block in content:
+                    if isinstance(block, str):
+                        parts.append(block)
+                    elif isinstance(block, dict):
+                        if block.get("type") == "text":
+                            parts.append(str(block.get("text") or ""))
+                        elif block.get("type") == "tool_result":
+                            inner = block.get("content") or ""
+                            if isinstance(inner, list):
+                                for ib in inner:
+                                    if isinstance(ib, dict) and ib.get("type") == "text":
+                                        parts.append(str(ib.get("text") or ""))
+                            elif isinstance(inner, str):
+                                parts.append(inner)
+                return " ".join(parts) if parts else ""
+
             new_messages = []
             for m in messages:
-                new_m = {**m}
-                if isinstance(new_m.get("content"), list):
-                    new_content = []
-                    for block in new_m["content"]:
-                        if isinstance(block, dict):
-                            new_block = {**block}
-                            new_block.pop("cache_control", None)
-                            new_content.append(new_block)
-                        else:
-                            new_content.append(block)
-                    new_m["content"] = new_content
-                new_messages.append(new_m)
+                role = m.get("role", "")
+                content = m.get("content", "")
+
+                if role == "tool":
+                    # GigaChat doesn't understand role=tool; convert to user message
+                    tool_name = m.get("name") or m.get("tool_call_id") or "tool"
+                    text = _flatten_content_for_gigachat(content)
+                    new_messages.append({
+                        "role": "user",
+                        "content": f"[Tool result from {tool_name}]: {text}",
+                    })
+                elif role == "assistant" and m.get("tool_calls"):
+                    # Strip tool_calls; summarize as plain text if no content
+                    text = _flatten_content_for_gigachat(content)
+                    tool_summaries = []
+                    for tc in (m.get("tool_calls") or []):
+                        fn = (tc.get("function") or {}).get("name", "tool")
+                        args = (tc.get("function") or {}).get("arguments", "")
+                        tool_summaries.append(f"[Called {fn}({args[:100]})]")
+                    combined = " ".join(filter(None, [text] + tool_summaries))
+                    new_messages.append({"role": "assistant", "content": combined or "[tool call]"})
+                else:
+                    new_m = {**m}
+                    new_m["content"] = _flatten_content_for_gigachat(content)
+                    new_messages.append(new_m)
             messages = new_messages
 
         kwargs: Dict[str, Any] = {

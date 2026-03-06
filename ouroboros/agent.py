@@ -160,33 +160,41 @@ class OuroborosAgent:
                 try:
                     # Only stage tracked files (not secrets/notebooks)
                     subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10, check=True)
-                    subprocess.run(
-                        ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
-                        cwd=str(self.env.repo_dir), timeout=30, check=True
+                    # Check if anything is actually staged before committing
+                    staged = subprocess.run(
+                        ["git", "diff", "--cached", "--quiet"],
+                        cwd=str(self.env.repo_dir), timeout=10
                     )
-                    # Validate branch name
-                    if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
-                        raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
-                    # Pull with rebase before push
-                    subprocess.run(
-                        ["git", "pull", "--rebase", "origin", self.env.branch_dev],
-                        cwd=str(self.env.repo_dir), timeout=60, check=True
-                    )
-                    # Push
-                    try:
+                    if staged.returncode != 0:  # non-zero = there are staged changes
                         subprocess.run(
-                            ["git", "push", "origin", self.env.branch_dev],
+                            ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
+                            cwd=str(self.env.repo_dir), timeout=30, check=True
+                        )
+                        # Validate branch name
+                        if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
+                            raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
+                        # Pull with rebase before push
+                        subprocess.run(
+                            ["git", "pull", "--rebase", "origin", self.env.branch_dev],
                             cwd=str(self.env.repo_dir), timeout=60, check=True
                         )
-                        auto_committed = True
-                        log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
-                    except subprocess.CalledProcessError:
-                        # If push fails, undo the commit
-                        subprocess.run(
-                            ["git", "reset", "HEAD~1"],
-                            cwd=str(self.env.repo_dir), timeout=10, check=True
-                        )
-                        raise
+                        # Push
+                        try:
+                            subprocess.run(
+                                ["git", "push", "origin", self.env.branch_dev],
+                                cwd=str(self.env.repo_dir), timeout=60, check=True
+                            )
+                            auto_committed = True
+                            log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
+                        except subprocess.CalledProcessError:
+                            # If push fails, undo the commit
+                            subprocess.run(
+                                ["git", "reset", "HEAD~1"],
+                                cwd=str(self.env.repo_dir), timeout=10, check=True
+                            )
+                            raise
+                    else:
+                        log.info("Auto-rescue: dirty files are untracked only, nothing to commit")
                 except Exception as e:
                     log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
                 return {
