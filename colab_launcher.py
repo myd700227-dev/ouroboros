@@ -46,7 +46,7 @@ def ensure_claude_code_cli() -> bool:
 # ----------------------------
 from ouroboros.apply_patch import install as install_apply_patch
 from ouroboros.llm import DEFAULT_LIGHT_MODEL
-    install_apply_patch()
+install_apply_patch()
 
 # ----------------------------
 # 1) Secrets + runtime config
@@ -157,15 +157,15 @@ os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
-    if str(ANTHROPIC_API_KEY or "").strip():
-        ensure_claude_code_cli()
+if str(ANTHROPIC_API_KEY or "").strip():
+    ensure_claude_code_cli()
 
-    # ----------------------------
-    # 2) Mount Drive
-    # ----------------------------
-    if _IN_COLAB:
-        if not pathlib.Path("/content/drive/MyDrive").exists():
-            drive.mount("/content/drive")
+# ----------------------------
+# 2) Mount Drive
+# ----------------------------
+if _IN_COLAB:
+    if not pathlib.Path("/content/drive/MyDrive").exists():
+        drive.mount("/content/drive")
     DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
     REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
 else:
