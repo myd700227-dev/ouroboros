@@ -159,42 +159,49 @@ class OuroborosAgent:
                 auto_committed = False
                 try:
                     # Only stage tracked files (not secrets/notebooks)
-                    subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10, check=True)
-                    # Check if anything is actually staged before committing
-                    staged = subprocess.run(
-                        ["git", "diff", "--cached", "--quiet"],
-                        cwd=str(self.env.repo_dir), timeout=10
-                    )
-                    if staged.returncode != 0:  # non-zero = there are staged changes
-                        subprocess.run(
-                            ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
-                            cwd=str(self.env.repo_dir), timeout=30, check=True
+                    r = subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10)
+                    if r.returncode == 128:
+                        # git index.lock exists — another process (concurrent worker) is using git.
+                        # Skip gracefully; the other process will handle the commit.
+                        log.debug("Auto-rescue: git index.lock busy, skipping (another worker racing)")
+                    elif r.returncode != 0:
+                        raise subprocess.CalledProcessError(r.returncode, r.args)
+                    else:
+                        # Check if anything is actually staged before committing
+                        staged = subprocess.run(
+                            ["git", "diff", "--cached", "--quiet"],
+                            cwd=str(self.env.repo_dir), timeout=10
                         )
-                        # Validate branch name
-                        if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
-                            raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
-                        # Pull with rebase before push
-                        subprocess.run(
-                            ["git", "pull", "--rebase", "origin", self.env.branch_dev],
-                            cwd=str(self.env.repo_dir), timeout=60, check=True
-                        )
-                        # Push
-                        try:
+                        if staged.returncode != 0:  # non-zero = there are staged changes
                             subprocess.run(
-                                ["git", "push", "origin", self.env.branch_dev],
+                                ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
+                                cwd=str(self.env.repo_dir), timeout=30, check=True
+                            )
+                            # Validate branch name
+                            if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
+                                raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
+                            # Pull with rebase before push
+                            subprocess.run(
+                                ["git", "pull", "--rebase", "origin", self.env.branch_dev],
                                 cwd=str(self.env.repo_dir), timeout=60, check=True
                             )
-                            auto_committed = True
-                            log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
-                        except subprocess.CalledProcessError:
-                            # If push fails, undo the commit
-                            subprocess.run(
-                                ["git", "reset", "HEAD~1"],
-                                cwd=str(self.env.repo_dir), timeout=10, check=True
-                            )
-                            raise
-                    else:
-                        log.info("Auto-rescue: dirty files are untracked only, nothing to commit")
+                            # Push
+                            try:
+                                subprocess.run(
+                                    ["git", "push", "origin", self.env.branch_dev],
+                                    cwd=str(self.env.repo_dir), timeout=60, check=True
+                                )
+                                auto_committed = True
+                                log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
+                            except subprocess.CalledProcessError:
+                                # If push fails, undo the commit
+                                subprocess.run(
+                                    ["git", "reset", "HEAD~1"],
+                                    cwd=str(self.env.repo_dir), timeout=10, check=True
+                                )
+                                raise
+                        else:
+                            log.debug("Auto-rescue: dirty files are untracked only, nothing to commit")
                 except Exception as e:
                     log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
                 return {
@@ -278,13 +285,16 @@ class OuroborosAgent:
                 spent = float(state_data.get("spent_usd", 0))
                 remaining = max(0, total_budget - spent)
 
-                if remaining < 10:
+                # Thresholds are percentage-based so a $50 total budget
+                # with $49.84 remaining correctly shows "ok" not "critical".
+                pct_remaining = remaining / total_budget if total_budget > 0 else 1.0
+                if pct_remaining < 0.05:      # < 5% left
                     status = "emergency"
                     issues = 1
-                elif remaining < 50:
+                elif pct_remaining < 0.20:    # < 20% left
                     status = "critical"
                     issues = 1
-                elif remaining < 100:
+                elif pct_remaining < 0.40:    # < 40% left
                     status = "warning"
                     issues = 0
                 else:
