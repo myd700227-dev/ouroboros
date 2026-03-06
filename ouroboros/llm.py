@@ -256,11 +256,25 @@ class LLMClient:
             kwargs["tools"] = tools_with_cache
             kwargs["tool_choice"] = tool_choice
 
-        resp = client.chat.completions.create(**kwargs)
-        resp_dict = resp.model_dump()
-        usage = resp_dict.get("usage") or {}
-        choices = resp_dict.get("choices") or [{}]
-        msg = (choices[0] if choices else {}).get("message") or {}
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            resp_dict = resp.model_dump()
+            usage = resp_dict.get("usage") or {}
+            choices = resp_dict.get("choices") or [{}]
+            msg = (choices[0] if choices else {}).get("message") or {}
+        except Exception as e:
+            if "gigachat" in getattr(client, "base_url", str(client)):
+                try:
+                    import json
+                    with open("/tmp/gigachat_crash_payload.json", "w") as f:
+                        # Convert un-serializable objects (like tools list if they contain non-dicts)
+                        try:
+                            json.dump(kwargs, f, indent=2)
+                        except Exception:
+                            f.write(repr(kwargs))
+                except Exception:
+                    pass
+            raise
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):
