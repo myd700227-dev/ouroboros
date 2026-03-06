@@ -141,6 +141,12 @@ class OuroborosAgent:
         """Check for uncommitted changes and attempt auto-rescue commit & push."""
         import re
         import subprocess
+        import os
+        
+        # Don't try to auto-commit and push if running local-only without a fork
+        if not bool(os.environ.get("GITHUB_REPO")):
+            return {"status": "ok"}, 0
+            
         try:
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
