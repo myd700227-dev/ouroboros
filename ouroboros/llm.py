@@ -303,6 +303,21 @@ class LLMClient:
                     new_m["content"] = _flatten_content_for_gigachat(content)
                     new_m.pop("tool_call_id", None)
                     new_messages.append(new_m)
+                    
+            if new_messages:
+                first_msg = new_messages[0]
+                system_texts = []
+                filtered = []
+                for nm in new_messages:
+                    if nm.get("role") == "system" and nm is not first_msg:
+                        system_texts.append(nm.get("content") or "")
+                    else:
+                        filtered.append(nm)
+                if system_texts:
+                    inject = "[System note]: " + " | ".join(t for t in system_texts if t)
+                    filtered.append({"role": "user", "content": inject})
+                new_messages = filtered
+
             messages = new_messages
 
         kwargs: Dict[str, Any] = {
@@ -357,9 +372,8 @@ class LLMClient:
             except Exception as _e:
                 from openai import BadRequestError
                 import httpx
-                # Wrap in OpenAI-like error so loop.py catches it normally
                 err_msg = str(_e)
-                if "400" in err_msg or "invalid JSON" in err_msg:
+                if "400" in err_msg or "invalid JSON" in err_msg or "422" in err_msg:
                     raise BadRequestError(err_msg, response=httpx.Response(status_code=400, request=httpx.Request("POST", url)), body=None)
                 raise
         else:
