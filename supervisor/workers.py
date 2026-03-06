@@ -46,8 +46,8 @@ _SPAWN_GRACE_SEC: float = 90.0  # workers need up to ~60s to init on Colab (spaw
 
 # On Linux/Colab, "spawn" re-imports __main__ (colab_launcher.py) in child processes.
 # Since launcher has top-level side effects, this causes worker child crashes (exitcode=1).
-# Use "fork" by default on Linux; allow override via env.
-_DEFAULT_WORKER_START_METHOD = "fork" if sys.platform.startswith("linux") else "spawn"
+# Use "fork" by default on Linux and macOS; allow override via env.
+_DEFAULT_WORKER_START_METHOD = "fork" if sys.platform.startswith("linux") or sys.platform == "darwin" else "spawn"
 _WORKER_START_METHOD = str(os.environ.get("OUROBOROS_WORKER_START_METHOD", _DEFAULT_WORKER_START_METHOD) or _DEFAULT_WORKER_START_METHOD).strip().lower()
 if _WORKER_START_METHOD not in {"fork", "spawn", "forkserver"}:
     _WORKER_START_METHOD = _DEFAULT_WORKER_START_METHOD
