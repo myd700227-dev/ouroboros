@@ -263,18 +263,19 @@ class LLMClient:
             choices = resp_dict.get("choices") or [{}]
             msg = (choices[0] if choices else {}).get("message") or {}
         except Exception as e:
-            if "gigachat" in getattr(client, "base_url", str(client)):
+            # We want to catch the original bad request error, and dump payload!
+            if "gigachat" in str(getattr(client, "base_url", str(client))):
                 try:
                     import json
                     with open("/tmp/gigachat_crash_payload.json", "w") as f:
-                        # Convert un-serializable objects (like tools list if they contain non-dicts)
+                        f.write(f"ERROR: {repr(e)}\n")
                         try:
                             json.dump(kwargs, f, indent=2)
                         except Exception:
                             f.write(repr(kwargs))
                 except Exception:
                     pass
-            raise
+            raise e
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):
