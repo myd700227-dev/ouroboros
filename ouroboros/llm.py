@@ -268,26 +268,40 @@ class LLMClient:
                 content = m.get("content", "")
 
                 if role == "tool":
-                    # GigaChat doesn't understand role=tool; convert to user message
+                    # GigaChat uses role=function (legacy API), not role=tool
                     tool_name = m.get("name") or m.get("tool_call_id") or "tool"
                     text = _flatten_content_for_gigachat(content)
                     new_messages.append({
-                        "role": "user",
-                        "content": f"[Tool result from {tool_name}]: {text}",
+                        "role": "function",
+                        "name": tool_name,
+                        "content": text or "",
                     })
                 elif role == "assistant" and m.get("tool_calls"):
-                    # Strip tool_calls; summarize as plain text if no content
+                    # Convert tool_calls -> function_call (GigaChat legacy API)
                     text = _flatten_content_for_gigachat(content)
-                    tool_summaries = []
-                    for tc in (m.get("tool_calls") or []):
-                        fn = (tc.get("function") or {}).get("name", "tool")
-                        args = (tc.get("function") or {}).get("arguments", "")
-                        tool_summaries.append(f"[Called {fn}({args[:100]})]")
-                    combined = " ".join(filter(None, [text] + tool_summaries))
-                    new_messages.append({"role": "assistant", "content": combined or "[tool call]"})
+                    tc_list = m.get("tool_calls") or []
+                    if tc_list:
+                        tc = tc_list[0]
+                        fn_name = (tc.get("function") or {}).get("name", "tool")
+                        fn_args_raw = (tc.get("function") or {}).get("arguments", "{}")
+                        try:
+                            import json as _json
+                            fn_args = _json.loads(fn_args_raw) if isinstance(fn_args_raw, str) else fn_args_raw
+                        except Exception:
+                            fn_args = fn_args_raw
+                        new_messages.append({
+                            "role": "assistant",
+                            "content": text or "",
+                            "function_call": {"name": fn_name, "arguments": fn_args},
+                        })
+                    else:
+                        new_m = {**m}
+                        new_m["content"] = text
+                        new_messages.append(new_m)
                 else:
                     new_m = {**m}
                     new_m["content"] = _flatten_content_for_gigachat(content)
+                    new_m.pop("tool_call_id", None)
                     new_messages.append(new_m)
             messages = new_messages
 
@@ -300,21 +314,64 @@ class LLMClient:
             kwargs["extra_body"] = extra_body
 
         if tools:
-            # Add cache_control to last tool for Anthropic prompt caching
-            # This caches all tool schemas (they never change between calls)
-            tools_with_cache = [t for t in tools]  # shallow copy
-            if not model.startswith("gigachat/") and tools_with_cache:
+            if model.startswith("gigachat/"):
+                # GigaChat uses legacy functions format, not OpenAI tools
+                functions = []
+                for t in tools:
+                    fn = t.get("function") or t
+                    functions.append({
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters") or fn.get("input_schema") or {},
+                    })
+                kwargs["functions"] = functions
+                kwargs["function_call"] = "auto"
+                log.debug("GigaChat: sending %d functions", len(functions))
+            else:
+                # Add cache_control to last tool for Anthropic prompt caching
+                tools_with_cache = [t for t in tools]  # shallow copy
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
-            kwargs["tools"] = tools_with_cache
-            kwargs["tool_choice"] = tool_choice
+                kwargs["tools"] = tools_with_cache
+                kwargs["tool_choice"] = tool_choice
 
         resp = client.chat.completions.create(**kwargs)
         resp_dict = resp.model_dump()
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
+
+        # Convert GigaChat legacy function_call -> OpenAI tool_calls
+        if model.startswith("gigachat/") and not msg.get("tool_calls"):
+            fc = msg.get("function_call")
+            if not fc:
+                try:
+                    raw_msg = resp.choices[0].message
+                    fc = getattr(raw_msg, "function_call", None) or (raw_msg.model_extra or {}).get("function_call")
+                    if hasattr(fc, "model_dump"):
+                        fc = fc.model_dump()
+                    elif fc and hasattr(fc, "__dict__"):
+                        fc = {k: v for k, v in fc.__dict__.items() if not k.startswith("_")}
+                except Exception:
+                    fc = None
+            if fc:
+                fc_name = fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)
+                finish_reason = (choices[0] if choices else {}).get("finish_reason", "?")
+                log.info("GigaChat response: finish_reason=%s, has_fc=%s, fc_name=%s", finish_reason, bool(fc), fc_name)
+                if fc_name:
+                    import json as _json, uuid as _uuid
+                    fn_args = fc.get("arguments", {}) if isinstance(fc, dict) else getattr(fc, "arguments", {})
+                    fn_args_str = _json.dumps(fn_args, ensure_ascii=False) if isinstance(fn_args, dict) else str(fn_args)
+                    msg["tool_calls"] = [{
+                        "id": f"call_{_uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {"name": fc_name, "arguments": fn_args_str},
+                    }]
+                    msg.pop("function_call", None)
+            else:
+                finish_reason = (choices[0] if choices else {}).get("finish_reason", "?")
+                log.warning("GigaChat empty response: finish_reason=%s content=%r", finish_reason, msg.get("content"))
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):
