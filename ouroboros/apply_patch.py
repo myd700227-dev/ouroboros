@@ -5,9 +5,9 @@ Writes apply_patch script to /usr/local/bin/ on import.
 Supports: *** Update File, *** Add File, *** Delete File, *** End of File.
 """
 import pathlib
+import os
 
-
-APPLY_PATCH_PATH = pathlib.Path("/usr/local/bin/apply_patch")
+APPLY_PATCH_PATH = pathlib.Path(os.path.expanduser("~/.local/bin/apply_patch"))
 APPLY_PATCH_CODE = r"""#!/usr/bin/env python3
 import os
 import sys

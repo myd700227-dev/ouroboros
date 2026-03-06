@@ -19,7 +19,8 @@ def install_launcher_deps() -> None:
         check=True,
     )
 
-install_launcher_deps()
+def main():
+    install_launcher_deps()
 
 def ensure_claude_code_cli() -> bool:
     """Best-effort install of Claude Code CLI for Anthropic-powered code edits."""
@@ -45,17 +46,25 @@ def ensure_claude_code_cli() -> bool:
 # ----------------------------
 from ouroboros.apply_patch import install as install_apply_patch
 from ouroboros.llm import DEFAULT_LIGHT_MODEL
-install_apply_patch()
+    install_apply_patch()
 
 # ----------------------------
 # 1) Secrets + runtime config
 # ----------------------------
-from google.colab import userdata  # type: ignore
-from google.colab import drive  # type: ignore
+try:
+    from google.colab import userdata  # type: ignore
+    from google.colab import drive  # type: ignore
+    _IN_COLAB = True
+except ImportError:
+    userdata = None
+    drive = None
+    _IN_COLAB = False
 
 _LEGACY_CFG_WARNED: Set[str] = set()
 
 def _userdata_get(name: str) -> Optional[str]:
+    if not _IN_COLAB:
+        return None
     try:
         return userdata.get(name)
     except Exception:
@@ -110,6 +119,7 @@ except Exception as e:
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")
+GIGACHAT_CREDENTIALS = get_secret("GIGACHAT_CREDENTIALS", default="")
 GITHUB_USER = get_cfg("GITHUB_USER", default=None, allow_legacy_secret=True)
 GITHUB_REPO = get_cfg("GITHUB_REPO", default=None, allow_legacy_secret=True)
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your config cell (see README)."
@@ -136,6 +146,7 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
+os.environ["GIGACHAT_CREDENTIALS"] = str(GIGACHAT_CREDENTIALS or "")
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
@@ -146,21 +157,27 @@ os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
-if str(ANTHROPIC_API_KEY or "").strip():
-    ensure_claude_code_cli()
+    if str(ANTHROPIC_API_KEY or "").strip():
+        ensure_claude_code_cli()
 
-# ----------------------------
-# 2) Mount Drive
-# ----------------------------
-if not pathlib.Path("/content/drive/MyDrive").exists():
-    drive.mount("/content/drive")
-
-DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
-REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
+    # ----------------------------
+    # 2) Mount Drive
+    # ----------------------------
+    if _IN_COLAB:
+        if not pathlib.Path("/content/drive/MyDrive").exists():
+            drive.mount("/content/drive")
+    DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
+    REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
+else:
+    # Run locally inside the current directory
+    _local_root = pathlib.Path.cwd().resolve()
+    DRIVE_ROOT = (_local_root / ".ouroboros").resolve()
+    REPO_DIR = _local_root
 
 for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
-REPO_DIR.mkdir(parents=True, exist_ok=True)
+if _IN_COLAB:
+    REPO_DIR.mkdir(parents=True, exist_ok=True)
 
 # Clear stale owner mailbox files from previous session
 try:
@@ -722,6 +739,9 @@ while True:
         )
         _last_diag_heartbeat_ts = now_epoch
 
-    # Short sleep in active mode (fast response), longer when idle (save CPU)
-    _loop_sleep = 0.1 if (_now - _last_message_ts) < _ACTIVE_MODE_SEC else 0.5
-    time.sleep(_loop_sleep)
+        # Short sleep in active mode (fast response), longer when idle (save CPU)
+        _loop_sleep = 0.1 if (_now - _last_message_ts) < _ACTIVE_MODE_SEC else 0.5
+        time.sleep(_loop_sleep)
+
+if __name__ == "__main__":
+    main()

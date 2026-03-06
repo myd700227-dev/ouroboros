@@ -190,6 +190,7 @@ Full text: [BIBLE.md](BIBLE.md)
 |----------|-------------|
 | `OPENAI_API_KEY` | Enables the `web_search` tool |
 | `ANTHROPIC_API_KEY` | Enables Claude Code CLI for code editing |
+| `GIGACHAT_CREDENTIALS` | Client ID and Secret (Base64 encoded) for GigaChat native support |
 
 ### Optional Configuration (environment variables)
 

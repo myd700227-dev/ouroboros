@@ -54,16 +54,20 @@ def git_capture(cmd: List[str]) -> Tuple[int, str, str]:
 
 
 def ensure_repo_present() -> None:
+    if not bool(os.environ.get("GITHUB_REPO")):
+        return
+        
     if not (REPO_DIR / ".git").exists():
         subprocess.run(["rm", "-rf", str(REPO_DIR)], check=False)
         subprocess.run(["git", "clone", REMOTE_URL, str(REPO_DIR)], check=True)
     else:
         subprocess.run(["git", "remote", "set-url", "origin", REMOTE_URL],
                         cwd=str(REPO_DIR), check=True)
-    subprocess.run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=False)
     subprocess.run(["git", "config", "user.email", "ouroboros@users.noreply.github.com"],
-                    cwd=str(REPO_DIR), check=True)
-    subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
+                    cwd=str(REPO_DIR), check=False)
+    # Ignore fetch failures for local runs without a fork
+    subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +214,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
     rc, _, err = git_capture(["git", "fetch", "origin"])
     if rc != 0:
         msg = f"git fetch failed: {err or 'unknown error'}"
+        # Log the error but don't fail immediately in local dev
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
@@ -218,7 +223,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 "target_branch": branch, "reason": reason, "error": msg,
             },
         )
-        return False, msg
+        # Continue rather than crashing out locally over a missing upstream
 
     policy = str(unsynced_policy or "ignore").strip().lower()
     if policy not in {"ignore", "block", "rescue_and_block", "rescue_and_reset"}:
@@ -288,20 +293,33 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         ["git", "rev-parse", "--verify", f"origin/{branch}"],
         cwd=str(REPO_DIR), capture_output=True,
     ).returncode
+    
+    # Try local branch if remote verification fails
     if rc_verify != 0:
-        msg = f"Branch {branch} not found on remote"
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "reset_branch_missing",
-                "target_branch": branch, "reason": reason,
-            },
-        )
-        return False, msg
-
-    subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
-    subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
+        rc_local = subprocess.run(
+            ["git", "rev-parse", "--verify", branch],
+            cwd=str(REPO_DIR), capture_output=True,
+        ).returncode
+        
+        if rc_local != 0:
+            msg = f"Branch {branch} not found on remote or locally - attempting to create it"
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "reset_branch_missing",
+                    "target_branch": branch, "reason": reason,
+                },
+            )
+            # Create branch locally from main if it doesn't exist
+            subprocess.run(["git", "checkout", "-b", branch], cwd=str(REPO_DIR), check=True)
+            return True, "Created local branch"
+            
+        subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
+        # Skip hard reset to origin if origin fails verify
+    else:
+        subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
+        subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
     # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
     for p in REPO_DIR.rglob("__pycache__"):
         shutil.rmtree(p, ignore_errors=True)

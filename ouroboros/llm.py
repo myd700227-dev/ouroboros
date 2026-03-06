@@ -113,8 +113,64 @@ class LLMClient:
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = base_url
         self._client = None
+        self._gigachat_token = None
+        self._gigachat_token_expires = 0.0
+        self._last_gigachat_token = None
 
-    def _get_client(self):
+    def _update_gigachat_token(self):
+        import requests
+        import uuid
+        import urllib3
+        
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        auth_data = os.environ.get("GIGACHAT_CREDENTIALS")
+        if not auth_data:
+            raise ValueError("GIGACHAT_CREDENTIALS environment variable is required for GigaChat models")
+            
+        scope = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+        
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json',
+            'RqUID': str(uuid.uuid4()),
+            'Authorization': f'Basic {auth_data}'
+        }
+        
+        resp = requests.post(
+            'https://ngw.devices.sberbank.ru:9443/api/v2/oauth',
+            headers=headers,
+            data={'scope': scope},
+            verify=False,
+            timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._gigachat_token = data.get('access_token')
+        
+        # expires_at is typically unix epoch in milliseconds
+        expires_at = data.get('expires_at', time.time() * 1000 + 1800000)
+        self._gigachat_token_expires = expires_at / 1000.0
+
+    def _get_client(self, model: str = ""):
+        if model.startswith("gigachat/"):
+            import time
+            now = time.time()
+            if not self._gigachat_token or now >= self._gigachat_token_expires - 60:
+                self._update_gigachat_token()
+                
+            if not getattr(self, "_gigachat_openai_client", None) or self._last_gigachat_token != self._gigachat_token:
+                from openai import OpenAI
+                import httpx
+                http_client = httpx.Client(verify=False)
+                self._gigachat_openai_client = OpenAI(
+                    base_url="https://gigachat.devices.sberbank.ru/api/v1",
+                    api_key=self._gigachat_token,
+                    http_client=http_client,
+                )
+                self._last_gigachat_token = self._gigachat_token
+            return self._gigachat_openai_client
+
         if self._client is None:
             from openai import OpenAI
             self._client = OpenAI(
@@ -161,7 +217,7 @@ class LLMClient:
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
-        client = self._get_client()
+        client = self._get_client(model)
         effort = normalize_reasoning_effort(reasoning_effort)
 
         extra_body: Dict[str, Any] = {
@@ -175,18 +231,25 @@ class LLMClient:
                 "allow_fallbacks": False,
                 "require_parameters": True,
             }
+        
+        actual_model = model
+        if model.startswith("gigachat/"):
+            actual_model = model[len("gigachat/"):]
+            extra_body.clear() # GigaChat does not support OpenRouter extra_body
 
         kwargs: Dict[str, Any] = {
-            "model": model,
+            "model": actual_model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "extra_body": extra_body,
         }
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
         if tools:
             # Add cache_control to last tool for Anthropic prompt caching
             # This caches all tool schemas (they never change between calls)
             tools_with_cache = [t for t in tools]  # shallow copy
-            if tools_with_cache:
+            if not model.startswith("gigachat/") and tools_with_cache:
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
